@@ -1,65 +1,83 @@
 package zio
 
+import zio.ZIO.succeedNow
+
 import scala.concurrent.ExecutionContext
 
 
-sealed trait ZIO[+A] { self =>
+sealed trait ZIO[+E, +A] { self =>
 
-  def fork: ZIO[Fiber[A]] = ZIO.Fork(self)
+  def fork: ZIO[Nothing, Fiber[E, A]] = ZIO.Fork(self)
 
-  def as[B](value: => B): ZIO[B] =
+  def as[B](value: => B): ZIO[E, B] =
     map(_ => value)
 
-  def flatMap[B](f: A => ZIO[B]): ZIO[B] =
+  def flatMap[E1 >: E, B](f: A => ZIO[E1, B]): ZIO[E1, B] =
     ZIO.FlatMap(self, f)
 
-  def map[B](f: A => B): ZIO[B] =
+  def map[E1 >: E, B](f: A => B): ZIO[E1, B] =
     flatMap(a => ZIO.succeedNow(f(a)))
 
-  def shift(executor: ExecutionContext): ZIO[Unit] =
+  def shift(executor: ExecutionContext): ZIO[Nothing, Unit] =
     ZIO.Shift(executor)
 
-  def repeat(n: Int): ZIO[Unit] = {
+  def repeat(n: Int): ZIO[E, Unit] = {
     if (n == 0) ZIO.succeed()
     else self *> repeat(n - 1)
   }
 
-  def zip[B](that: ZIO[B]): ZIO[(A, B)] =
+  def zip[E1 >: E, B](that: ZIO[E1, B]): ZIO[E1, (A, B)] =
     zipWith(that)(_ -> _)
 
-  def *>[B](that: => ZIO[B]): ZIO[B] =
+  def *>[E1 >: E, B](that: => ZIO[E1, B]): ZIO[E1, B] =
     zipRight(that)
 
-  def zipRight[B](that: => ZIO[B]): ZIO[B] =
+  def zipRight[E1 >: E, B](that: => ZIO[E1, B]): ZIO[E1, B] =
     zipWith(that)((_, b) => b)
 
-  def zipWith[B, C](that: => ZIO[B])(f: (A, B) => C): ZIO[C] =
+  def zipWith[E1 >: E, B, C](that: => ZIO[E1, B])(f: (A, B) => C): ZIO[E1, C] =
     for {
       a <- self
       b <- that
     } yield f(a, b)
 
-  def zipPar[B](that: ZIO[B]): ZIO[(A, B)] =
+  def zipPar[E1 >: E, B](that: ZIO[E1, B]): ZIO[E1, (A, B)] =
     for {
       fiber <- self.fork
       b <- that
       a <- fiber.join
     } yield (a, b)
 
-  def unsafeRunSync: A = {
-    var result: A = null.asInstanceOf[A]
+  def catchAll[E1, A1 >: A](failure: E => ZIO[E1, A1]): ZIO[E1, A1] = {
+    foldZIO(e => failure(e), a => succeedNow(a))
+  }
+
+  def fold[B](failure: E => B, success: A => B): ZIO[E, B] =
+    foldZIO(e => succeedNow(failure(e)), a => succeedNow(success(a)))
+
+  def foldZIO[E1, B](failure: E => ZIO[E1, B], success: A => ZIO[E1, B]): ZIO[E1, B] =
+    ZIO.Fold(self, failure, success)
+
+  def unsafeRunSync: Either[E, A] = {
+    var result: Either[E, A] = null.asInstanceOf[Either[E, A]]
     val latch = new java.util.concurrent.CountDownLatch(1)
-    val zio = self.flatMap(a => ZIO.succeed {
-      result = a
-      latch.countDown()
-    })
+    val zio = self.foldZIO(
+      e => ZIO.succeed {
+        result = Left(e)
+        latch.countDown()
+      },
+      a => ZIO.succeed {
+        result = Right(a)
+        latch.countDown()
+      }
+    )
 
     zio.unsafeRunFiber
     latch.await()
     result
   }
 
-  private def unsafeRunFiber: Fiber[A] =
+  private def unsafeRunFiber: Fiber[E, A] =
     FiberContext(self, ZIO.defaultExecutor)
 }
 
@@ -67,23 +85,33 @@ sealed trait ZIO[+A] { self =>
 
 object ZIO {
 
-  def succeedNow[A](value: A): ZIO[A] = Succeed(value)
+  def succeedNow[A](value: A): ZIO[Nothing, A] = SucceedNow(value)
 
-  def succeed[A](value: => A): ZIO[A] = Effect(() => value)
+  def succeed[A](value: => A): ZIO[Nothing, A] = Succeed(() => value)
 
-  def async[A](f: (A => Any) => Any): ZIO[A] = ZIO.Async(f: (A => Any) => Any)
+  def async[A](f: (A => Any) => Any): ZIO[Nothing, A] = ZIO.Async(f: (A => Any) => Any)
 
-  case class Succeed[A](value: A) extends ZIO[A]
+  def fail[E](e: => E): ZIO[E, Nothing] = ZIO.Fail(() => e)
 
-  case class Effect[A](f: () => A) extends ZIO[A]
+  case class SucceedNow[A](value: A) extends ZIO[Nothing, A]
 
-  case class FlatMap[A, B](zio: ZIO[A], f: A => ZIO[B]) extends ZIO[B]
+  case class Succeed[A](f: () => A) extends ZIO[Nothing, A]
 
-  case class Async[A](register: (A => Any) => Any) extends ZIO[A]
+  case class FlatMap[E, E1 >: E, A, B](zio: ZIO[E, A], f: A => ZIO[E1, B]) extends ZIO[E1, B]
 
-  case class Fork[A](zio: ZIO[A]) extends ZIO[Fiber[A]]
+  case class Async[A](register: (A => Any) => Any) extends ZIO[Nothing, A]
 
-  case class Shift(executor: ExecutionContext) extends ZIO[Unit]
+  case class Fork[E, A](zio: ZIO[E, A]) extends ZIO[Nothing, Fiber[E, A]]
+
+  case class Shift(executor: ExecutionContext) extends ZIO[Nothing, Unit]
+
+  case class Fail[E](e: () => E) extends ZIO[E, Nothing]
+
+  case class Fold[E, E1, A, B](zio: ZIO[E, A], failure: E => ZIO[E1, B], success: A => ZIO[E1, B])
+      extends ZIO[E1, B] with (A => ZIO[E1, B]) {
+    
+    override def apply(a: A): ZIO[E1, B] = success(a)
+  }
 
   private val defaultExecutor = ExecutionContext.global
 }

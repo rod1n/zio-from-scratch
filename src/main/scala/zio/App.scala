@@ -5,14 +5,12 @@ case class Person(name: String, age: Int)
 object Zip {
 
   def main(args: Array[String]): Unit = {
-    val rick =
       (ZIO.succeed("Rick") zip ZIO.succeed(70))
         .map({
           case (name, age) => Person(name, age)
         })
+        .map(rick => println(s"Hello, ${rick.name}!"))
         .unsafeRunSync
-
-    println(s"Hello, ${rick.name}!")
   }
 }
 
@@ -21,7 +19,7 @@ object FlatMap {
   def main(args: Array[String]): Unit = {
     def getMorty = ZIO.succeed(Person("Morty", 14))
 
-    def greet(person: Person): ZIO[Unit] = {
+    def greet(person: Person): ZIO[Nothing, Unit] = {
       ZIO.succeed(println(s"Hello, ${person.name}!"))
     }
 
@@ -82,14 +80,18 @@ object ZipPar {
 object StackSafety {
 
   def main(args: Array[String]): Unit = {
-//    def loop(n: Int, zio: ZIO[Any] = ZIO.succeed()): ZIO[Any]= {
-//      if (n == 0) zio
-//      else loop(n - 1, zio.map(_ => println("Wubba Lubba Dub-Dub")))
-//    }
-//    loop(10000).run(_ => ())
-
     ZIO.succeed(println("Wubba Lubba Dub-Dub"))
       .repeat(10000)
+      .unsafeRunSync
+  }
+}
+
+object ErrorHandling {
+
+  def main(args: Array[String]): Unit = {
+    ZIO.fail("Failed")
+      .flatMap(_ => ZIO.succeed(println("Will not be printed")))
+      .catchAll(_ => ZIO.succeed(println("Recovered from an error")))
       .unsafeRunSync
   }
 }
