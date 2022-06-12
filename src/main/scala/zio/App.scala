@@ -95,3 +95,18 @@ object ErrorHandling {
       .unsafeRunSync
   }
 }
+
+object UnexpectedExceptionHandling {
+
+  def main(args: Array[String]): Unit = {
+    val result = ZIO.succeed(List().head)
+      .flatMap(_ => ZIO.succeed(println("Will not be printed")))
+      .catchAll(_ => ZIO.succeed(println("Will not be printed")))
+      .foldZIOCause[Nothing, Unit](
+        cause => ZIO.succeed(println(s"Recovered from an error $cause")) *> ZIO.succeed(1),
+        _ => ZIO.succeed(0))
+      .unsafeRunSync
+
+    println(result)
+  }
+}

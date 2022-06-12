@@ -15,8 +15,8 @@ private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: Execu
   type ErrorHandler = ZIO.Fold[Any, Any, Any, Any]
 
   sealed trait FiberState
-  case class Running(callbacks: List[Either[E, A] => Any]) extends FiberState
-  case class Done(result: Either[E, A]) extends FiberState
+  case class Running(callbacks: List[Exit[E, A] => Any]) extends FiberState
+  case class Done(result: Exit[E, A]) extends FiberState
 
   private var loop = true
   private var currentZIO: Erased = zio
@@ -25,13 +25,11 @@ private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: Execu
   private val state: AtomicReference[FiberState] = new AtomicReference(Running(List.empty))
 
   override def join: ZIO[E, A] = {
-    ZIO.async[Either[E, A]](callback => await(callback))
-      .flatMap(result =>
-        result.fold(e => ZIO.fail(e), a => ZIO.succeed(a))
-      )
+    ZIO.async[Exit[E, A]](callback => await(callback))
+      .flatMap(ZIO.done)
   }
 
-  private def complete(result: Either[E, A]): Unit = {
+  private def complete(result: Exit[E, A]): Unit = {
     var loop = true;
     while (loop) {
       val oldState = state.get()
@@ -47,7 +45,7 @@ private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: Execu
     }
   }
 
-  private def await(callback: Either[E, A] => Any): Unit = {
+  private def await(callback: Exit[E, A] => Any): Unit = {
     var loop = true
     while (loop) {
       val oldState = state.get()
@@ -66,7 +64,7 @@ private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: Execu
     def continue(value: Any): Unit = {
       if (stack.isEmpty) {
         loop = false
-        complete(Right(value.asInstanceOf[A]))
+        complete(Exit.Success(value.asInstanceOf[A]))
       } else {
         val cont = stack.pop()
         currentZIO = cont(value)
@@ -86,41 +84,46 @@ private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: Execu
     }
 
     while (loop) {
-      currentZIO match {
-        case ZIO.SucceedNow(value) =>
-          continue(value)
-        case ZIO.Succeed(f) =>
-          continue(f())
-        case ZIO.FlatMap(zio, cont) =>
-          currentZIO = zio
-          stack.push(cont)
-        case ZIO.Async(register) =>
-          loop = false
-          if (stack.isEmpty) {
-            register(a => complete(Right(a.asInstanceOf[A])))
-          } else {
-            register(a => {
-              currentZIO = ZIO.succeedNow(a)
-              loop = true
-              run()
-            })
-          }
-        case ZIO.Fork(zio) =>
-          val fiber = FiberContext(zio, currentExecutor)
-          continue(fiber)
-        case ZIO.Shift(executor) =>
-          currentExecutor = executor
-          continue(())
-        case ZIO.Fail(e) =>
-          val errorHandler = findErrorHandler()
-          if (errorHandler eq null) {
-            complete(Left(e().asInstanceOf[E]))
-          } else {
-            currentZIO = errorHandler.failure(e())
-          }
-        case fold @ ZIO.Fold(zio, _, _) =>
-          currentZIO = zio
-          stack.push(fold)
+      try {
+        currentZIO match {
+          case ZIO.SucceedNow(value) =>
+            continue(value)
+          case ZIO.Succeed(f) =>
+            continue(f())
+          case ZIO.FlatMap(zio, cont) =>
+            currentZIO = zio
+            stack.push(cont)
+          case ZIO.Async(register) =>
+            loop = false
+            if (stack.isEmpty) {
+              register(a => complete(Exit.Success(a.asInstanceOf[A])))
+            } else {
+              register(a => {
+                currentZIO = ZIO.succeedNow(a)
+                loop = true
+                run()
+              })
+            }
+          case ZIO.Fork(zio) =>
+            val fiber = FiberContext(zio, currentExecutor)
+            continue(fiber)
+          case ZIO.Shift(executor) =>
+            currentExecutor = executor
+            continue(())
+          case ZIO.Fail(cause) =>
+            val errorHandler = findErrorHandler()
+            if (errorHandler eq null) {
+              complete(Exit.Failure(cause().asInstanceOf[Cause[E]]))
+            } else {
+              currentZIO = errorHandler.failure(cause())
+            }
+          case fold @ ZIO.Fold(zio, _, _) =>
+            currentZIO = zio
+            stack.push(fold)
+        }
+      } catch {
+        case throwable: Throwable =>
+          currentZIO = ZIO.failCause(Cause.Die(throwable))
       }
     }
   }

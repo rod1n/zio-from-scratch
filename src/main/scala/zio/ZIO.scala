@@ -55,19 +55,26 @@ sealed trait ZIO[+E, +A] { self =>
   def fold[B](failure: E => B, success: A => B): ZIO[E, B] =
     foldZIO(e => succeedNow(failure(e)), a => succeedNow(success(a)))
 
-  def foldZIO[E1, B](failure: E => ZIO[E1, B], success: A => ZIO[E1, B]): ZIO[E1, B] =
+  def foldZIO[E1, B](failure: E => ZIO[E1, B], success: A => ZIO[E1, B]): ZIO[E1, B] = {
+    foldZIOCause({
+      case Cause.Fail(error)    => failure(error)
+      case cause @ Cause.Die(_) => ZIO.failCause(cause)
+    }, success)
+  }
+
+  def foldZIOCause[E1, B](failure: Cause[E] => ZIO[E1, B], success: A => ZIO[E1, B]): ZIO[E1, B] =
     ZIO.Fold(self, failure, success)
 
-  def unsafeRunSync: Either[E, A] = {
-    var result: Either[E, A] = null.asInstanceOf[Either[E, A]]
+  def unsafeRunSync: Exit[E, A] = {
+    var result: Exit[E, A] = null.asInstanceOf[Exit[E, A]]
     val latch = new java.util.concurrent.CountDownLatch(1)
-    val zio = self.foldZIO(
-      e => ZIO.succeed {
-        result = Left(e)
+    val zio = self.foldZIOCause(
+      cause => ZIO.succeed {
+        result = Exit.Failure(cause)
         latch.countDown()
       },
       a => ZIO.succeed {
-        result = Right(a)
+        result = Exit.Success(a)
         latch.countDown()
       }
     )
@@ -91,7 +98,15 @@ object ZIO {
 
   def async[A](f: (A => Any) => Any): ZIO[Nothing, A] = ZIO.Async(f: (A => Any) => Any)
 
-  def fail[E](e: => E): ZIO[E, Nothing] = ZIO.Fail(() => e)
+  def fail[E](e: => E): ZIO[E, Nothing] = failCause(Cause.Fail(e))
+
+  def failCause[E](cause: => Cause[E]): ZIO[E, Nothing] = ZIO.Fail(() => cause)
+
+  def done[E, A](exit: Exit[E, A]): ZIO[E, A] =
+    exit match {
+      case Exit.Success(a) => ZIO.succeedNow(a)
+      case Exit.Failure(cause) => ZIO.failCause(cause)
+    }
 
   case class SucceedNow[A](value: A) extends ZIO[Nothing, A]
 
@@ -105,13 +120,35 @@ object ZIO {
 
   case class Shift(executor: ExecutionContext) extends ZIO[Nothing, Unit]
 
-  case class Fail[E](e: () => E) extends ZIO[E, Nothing]
+  case class Fail[E](cause: () => Cause[E]) extends ZIO[E, Nothing]
 
-  case class Fold[E, E1, A, B](zio: ZIO[E, A], failure: E => ZIO[E1, B], success: A => ZIO[E1, B])
+  case class Fold[E, E1, A, B](zio: ZIO[E, A], failure: Cause[E] => ZIO[E1, B], success: A => ZIO[E1, B])
       extends ZIO[E1, B] with (A => ZIO[E1, B]) {
     
     override def apply(a: A): ZIO[E1, B] = success(a)
+
+    override def toString(): String = s"Fold($zio, $failure, $success)"
   }
 
   private val defaultExecutor = ExecutionContext.global
+}
+
+
+sealed trait Cause[+E]
+
+object Cause {
+  final case class Fail[E](error: E) extends Cause[E]
+  final case class Die(throwable: Throwable) extends Cause[Nothing]
+}
+
+
+sealed trait Exit[+E, +A]
+
+object Exit {
+  final case class Success[A](a: A) extends Exit[Nothing, A]
+  final case class Failure[E](cause: Cause[E]) extends Exit[E, Nothing]
+
+  def success[A](a: A): Success[A] = Success(a)
+  def fail[E](e: E): Failure[E] = Failure(Cause.Fail(e))
+  def die(throwable: Throwable): Failure[Nothing] = Failure(Cause.Die(throwable))
 }
