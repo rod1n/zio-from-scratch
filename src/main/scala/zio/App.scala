@@ -100,13 +100,36 @@ object UnexpectedExceptionHandling {
 
   def main(args: Array[String]): Unit = {
     val result = ZIO.succeed(List().head)
-      .flatMap(_ => ZIO.succeed(println("Will not be printed")))
+      .zipRight(ZIO.succeed(println("Will not be printed")))
       .catchAll(_ => ZIO.succeed(println("Will not be printed")))
-      .foldZIOCause[Nothing, Unit](
+      .foldCauseZIO[Nothing, Unit](
         cause => ZIO.succeed(println(s"Recovered from an error $cause")) *> ZIO.succeed(1),
         _ => ZIO.succeed(0))
       .unsafeRunSync
 
     println(result)
+  }
+}
+
+object Interruption {
+
+  def main(args: Array[String]): Unit = {
+
+    val calculation1 =
+      (ZIO.succeed(Thread.sleep(1000)) *> ZIO.succeed(println("Cannot be interrupted")))
+        .repeat(5)
+
+    val calculation2 =
+      (ZIO.succeed(Thread.sleep(1000)) *> ZIO.succeed(println("Can be interrupted")))
+        .forever
+
+    val zio = for {
+      fiber <- (calculation1.uninterruptible *> calculation2)
+        .ensuring(ZIO.succeed(println("Resources released"))).fork
+      _ <- ZIO.succeed(Thread.sleep(3000))
+      _ <- fiber.interrupt
+    } yield ZIO.succeed(0)
+
+    zio.unsafeRunSync
   }
 }

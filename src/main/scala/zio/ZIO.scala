@@ -1,7 +1,5 @@
 package zio
 
-import zio.ZIO.succeedNow
-
 import scala.concurrent.ExecutionContext
 
 
@@ -48,27 +46,41 @@ sealed trait ZIO[+E, +A] { self =>
       a <- fiber.join
     } yield (a, b)
 
+  def forever: ZIO[E, A] = self *> forever
+
+  def ensuring(finalizer: ZIO[Nothing, Any]): ZIO[E, A] =
+    foldCauseZIO(
+      cause => finalizer *> ZIO.failCause(cause),
+      a     => finalizer *> ZIO.succeed(a))
+
+  def interruptible: ZIO[E, A] =
+    ZIO.SetInterruptStatus(self, InterruptionStatus.Interruptible)
+
+  def uninterruptible: ZIO[E, A] =
+    ZIO.SetInterruptStatus(self, InterruptionStatus.Uninterruptible)
+
   def catchAll[E1, A1 >: A](failure: E => ZIO[E1, A1]): ZIO[E1, A1] = {
-    foldZIO(e => failure(e), a => succeedNow(a))
+    foldZIO(e => failure(e), a => ZIO.succeedNow(a))
   }
 
   def fold[B](failure: E => B, success: A => B): ZIO[E, B] =
-    foldZIO(e => succeedNow(failure(e)), a => succeedNow(success(a)))
+    foldZIO(e => ZIO.succeedNow(failure(e)), a => ZIO.succeedNow(success(a)))
 
   def foldZIO[E1, B](failure: E => ZIO[E1, B], success: A => ZIO[E1, B]): ZIO[E1, B] = {
-    foldZIOCause({
+    foldCauseZIO({
       case Cause.Fail(error)    => failure(error)
       case cause @ Cause.Die(_) => ZIO.failCause(cause)
+      case Cause.Interrupt => ZIO.failCause(Cause.Interrupt)
     }, success)
   }
 
-  def foldZIOCause[E1, B](failure: Cause[E] => ZIO[E1, B], success: A => ZIO[E1, B]): ZIO[E1, B] =
+  def foldCauseZIO[E1, B](failure: Cause[E] => ZIO[E1, B], success: A => ZIO[E1, B]): ZIO[E1, B] =
     ZIO.Fold(self, failure, success)
 
   def unsafeRunSync: Exit[E, A] = {
     var result: Exit[E, A] = null.asInstanceOf[Exit[E, A]]
     val latch = new java.util.concurrent.CountDownLatch(1)
-    val zio = self.foldZIOCause(
+    val zio = self.foldCauseZIO(
       cause => ZIO.succeed {
         result = Exit.Failure(cause)
         latch.countDown()
@@ -87,8 +99,6 @@ sealed trait ZIO[+E, +A] { self =>
   private def unsafeRunFiber: Fiber[E, A] =
     FiberContext(self, ZIO.defaultExecutor)
 }
-
-
 
 object ZIO {
 
@@ -124,26 +134,38 @@ object ZIO {
 
   case class Fold[E, E1, A, B](zio: ZIO[E, A], failure: Cause[E] => ZIO[E1, B], success: A => ZIO[E1, B])
       extends ZIO[E1, B] with (A => ZIO[E1, B]) {
-    
+
     override def apply(a: A): ZIO[E1, B] = success(a)
 
     override def toString(): String = s"Fold($zio, $failure, $success)"
   }
+
+  case class SetInterruptStatus[E, A](zio: ZIO[E, A], interruptStatus: InterruptStatus) extends ZIO[E, A]
 
   private val defaultExecutor = ExecutionContext.global
 }
 
 
 sealed trait Cause[+E]
-
 object Cause {
   final case class Fail[E](error: E) extends Cause[E]
   final case class Die(throwable: Throwable) extends Cause[Nothing]
+  case object Interrupt extends Cause[Nothing]
 }
 
+sealed trait InterruptStatus { self =>
+
+  def toBoolean: Boolean = self match {
+    case InterruptionStatus.Interruptible => true
+    case InterruptionStatus.Uninterruptible => false
+  }
+}
+object InterruptionStatus {
+  case object Interruptible extends InterruptStatus
+  case object Uninterruptible extends InterruptStatus
+}
 
 sealed trait Exit[+E, +A]
-
 object Exit {
   final case class Success[A](a: A) extends Exit[Nothing, A]
   final case class Failure[E](cause: Cause[E]) extends Exit[E, Nothing]
