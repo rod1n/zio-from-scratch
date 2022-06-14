@@ -19,7 +19,7 @@ object FlatMap {
   def main(args: Array[String]): Unit = {
     def getMorty = ZIO.succeed(Person("Morty", 14))
 
-    def greet(person: Person): ZIO[Nothing, Unit] = {
+    def greet(person: Person): ZIO[Any, Nothing, Unit] = {
       ZIO.succeed(println(s"Hello, ${person.name}!"))
     }
 
@@ -102,7 +102,7 @@ object UnexpectedExceptionHandling {
     val result = ZIO.succeed(List().head)
       .zipRight(ZIO.succeed(println("Will not be printed")))
       .catchAll(_ => ZIO.succeed(println("Will not be printed")))
-      .foldCauseZIO[Nothing, Unit](
+      .foldCauseZIO[Any, Nothing, Unit](
         cause => ZIO.succeed(println(s"Recovered from an error $cause")) *> ZIO.succeed(1),
         _ => ZIO.succeed(0))
       .unsafeRunSync
@@ -131,5 +131,14 @@ object Interruption {
     } yield ZIO.succeed(0)
 
     zio.unsafeRunSync
+  }
+}
+
+object Environment {
+  
+  def main(args: Array[String]): Unit = {
+    ZIO.accessZIO[Int, Nothing, Unit](number => ZIO.succeed(println(number)))
+      .provide(42)
+      .unsafeRunSync
   }
 }

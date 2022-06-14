@@ -6,15 +6,15 @@ import scala.concurrent.ExecutionContext
 
 trait Fiber[+E, +A] {
 
-  def join: ZIO[E, A]
+  def join: ZIO[Any, E, A]
 
-  def interrupt: ZIO[Nothing, Unit]
+  def interrupt: ZIO[Any, Nothing, Unit]
 }
 
-private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: ExecutionContext) extends Fiber[E, A] {
-  type Erased = ZIO[Any, Any]
+private final case class FiberContext[R, E, A](zio: ZIO[Any, E, A], startExecutor: ExecutionContext) extends Fiber[E, A] {
+  type Erased = ZIO[Any, Any, Any]
   type Cont = Any => Erased
-  type ErrorHandler = ZIO.Fold[Any, Any, Any, Any]
+  type ErrorHandler = ZIO.Fold[Any, Any, Any, Any, Any, Any]
 
   sealed trait FiberState
   case class Running(callbacks: List[Exit[E, A] => Any]) extends FiberState
@@ -24,17 +24,18 @@ private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: Execu
   private var currentZIO: Erased = zio
   private var currentExecutor = startExecutor
   private val stack = mutable.Stack[Cont]()
+  private val envStack = mutable.Stack[Any]()
   private val state: AtomicReference[FiberState] = new AtomicReference(Running(List.empty))
   private val interrupted: AtomicBoolean = new AtomicBoolean(false)
   private val interrupting: AtomicBoolean = new AtomicBoolean(false)
   private val interruptible: AtomicBoolean = new AtomicBoolean(true)
 
-  override def interrupt: ZIO[Nothing, Unit] =
+  override def interrupt: ZIO[Any, Nothing, Unit] =
     ZIO.succeed {
       interrupted.set(true)
     }
 
-  override def join: ZIO[E, A] = {
+  override def join: ZIO[Any, E, A] = {
     ZIO.async[Exit[E, A]](callback => await(callback))
       .flatMap(ZIO.done)
   }
@@ -109,7 +110,7 @@ private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: Execu
             case ZIO.Succeed(f) =>
               continue(f())
             case ZIO.FlatMap(zio, cont) =>
-              currentZIO = zio
+              currentZIO = zio.asInstanceOf[Erased]
               stack.push(cont)
             case ZIO.Async(register) =>
               loop = false
@@ -137,12 +138,18 @@ private final case class FiberContext[E, A](zio: ZIO[E, A], startExecutor: Execu
                 currentZIO = errorHandler.failure(cause())
               }
             case fold @ ZIO.Fold(zio, _, _) =>
-              currentZIO = zio
+              currentZIO = zio.asInstanceOf[Erased]
               stack.push(fold)
             case ZIO.SetInterruptStatus(zio, interruptStatus) =>
               val previousValue = interruptible.get()
               interruptible.set(interruptStatus.toBoolean)
               currentZIO = zio.ensuring(ZIO.succeed(interruptible.set(previousValue)))
+            case ZIO.Provide(zio, env) =>
+              envStack.push(env)
+              currentZIO = zio.ensuring(ZIO.succeed(envStack.pop()))
+            case ZIO.Access(f) =>
+              val currentEnv = envStack.head
+              currentZIO = f(currentEnv)
           }
         } catch {
           case throwable: Throwable =>
