@@ -1,6 +1,7 @@
 package zio
 
 import scala.concurrent.ExecutionContext
+import scala.reflect.ClassTag
 
 
 sealed trait ZIO[-R, +E, +A] { self =>
@@ -104,15 +105,20 @@ sealed trait ZIO[-R, +E, +A] { self =>
 
 object ZIO {
 
-  def succeedNow[A](value: A): ZIO[Any, Nothing, A] = SucceedNow(value)
+  def succeedNow[A](value: A): ZIO[Any, Nothing, A] = ZIO.SucceedNow(value)
 
-  def succeed[A](value: => A): ZIO[Any, Nothing, A] = Succeed(() => value)
+  def succeed[A](value: => A): ZIO[Any, Nothing, A] = ZIO.Succeed(() => value)
+
+  def service[R](implicit classTag: ClassTag[R]): ZIO[Has[R], Nothing, R] =
+    ZIO.accessZIO(env => ZIO.succeed(env.get[R]))
+
+  def environment[R]: ZIO[R, Nothing, R] = ZIO.accessZIO(env => ZIO.succeed(env))
 
   def accessZIO[R, E, A](f: R => ZIO[R, E, A]): ZIO[R, E, A] = ZIO.Access(f)
 
   def async[A](f: (A => Any) => Any): ZIO[Any, Nothing, A] = ZIO.Async(f: (A => Any) => Any)
 
-  def fail[R, E](e: => E): ZIO[R, E, Nothing] = failCause(Cause.Fail(e))
+  def fail[R, E](e: => E): ZIO[R, E, Nothing] = ZIO.failCause(Cause.Fail(e))
 
   def failCause[R, E](cause: => Cause[E]): ZIO[R, E, Nothing] = ZIO.Fail(() => cause)
 

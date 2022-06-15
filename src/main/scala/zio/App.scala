@@ -135,10 +135,27 @@ object Interruption {
 }
 
 object Environment {
-  
+
   def main(args: Array[String]): Unit = {
-    ZIO.accessZIO[Int, Nothing, Unit](number => ZIO.succeed(println(number)))
-      .provide(42)
+    def greet(person: Person): Unit = println(s"Hello, ${person.name}!")
+
+    val program = for {
+      name <- ZIO.service[String]
+      age  <- ZIO.service[Int]
+      f    <- ZIO.service[Person => Unit]
+      _    <- ZIO.succeed(f(Person(name, age)))
+    } yield ()
+
+    val env = Has.succeed(greet(_))
+    val env1 = env ++ Has.succeed("Morty") ++ Has.succeed(14)
+    val env2 = env ++ Has.succeed(70) ++ Has.succeed("Rick")
+
+    program
+      .provide(env1)
+      .unsafeRunSync
+
+    program
+      .provide(env2)
       .unsafeRunSync
   }
 }
